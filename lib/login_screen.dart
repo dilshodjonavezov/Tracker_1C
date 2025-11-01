@@ -1,3 +1,5 @@
+import 'package:background_location_tracker_example/managers/log_manager.dart';
+import 'package:background_location_tracker_example/screens/my_app.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:background_location_tracker_example/main.dart';
@@ -138,28 +140,32 @@ class _UserIdInputScreenState extends State<UserIdInputScreen> {
     );
   }
 
-  Future<void> _saveUserId() async {
-    if (!_formKey.currentState!.validate()) return;
+ Future<void> _saveUserId() async {
+  if (!_formKey.currentState!.validate()) return;
 
-    setState(() => _isLoading = true);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('user_id', _userIdController.text.trim());
-      _navigateToMainApp();
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Ошибка сохранения: $e'),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
+  setState(() => _isLoading = true);
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = _userIdController.text.trim();
+    await prefs.setString('user_id', userId);
+    await prefs.setString('user_id_backup', userId); // Резервная копия
+    await LogManager().log('UserIdInputScreen: User ID saved: $userId');
+    _navigateToMainApp();
+  } catch (e) {
+    await LogManager().log('UserIdInputScreen: ERROR saving userId: $e');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Ошибка сохранения: $e'),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
         ),
-      );
-    } finally {
-      setState(() => _isLoading = false);
-    }
+      ),
+    );
+  } finally {
+    setState(() => _isLoading = false);
   }
+}
 
   void _navigateToMainApp() {
     Navigator.of(context).pushReplacement(
