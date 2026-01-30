@@ -15,6 +15,7 @@ class ServerService {
   bool _isSendingPendingData = false;
   DateTime? _lastSentTime;
   Timer? _periodicSendTimer;
+  
   // Expose the log stream
   Stream<String> get logStream => _logController.stream;
 
@@ -29,6 +30,7 @@ class ServerService {
     return '${dateTime.year}-${dateTime.month.toString().padLeft(2, '0')}-${dateTime.day.toString().padLeft(2, '0')}T${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}';
   }
 
+  // 🔍 Получение статуса пользователя с сервера (включен ли GPS, рабочее время)
   Future<Map<String, dynamic>?> getUserStatus(String userId) async {
     _logManager.log('ServerService: Requesting user status for user_id=$userId');
     try {
@@ -38,7 +40,7 @@ class ServerService {
       _logManager.log('ServerService: Headers: $headers');
 
       final response = await http.get(Uri.parse(url), headers: headers).timeout(
-        const Duration(seconds: 10),
+        const Duration(seconds: 10), // ⏱️ 10 секунд - таймаут для запроса статуса
         onTimeout: () => http.Response('Timeout', 408),
       );
 
@@ -51,12 +53,15 @@ class ServerService {
     }
   }
 
+  // 📤 Отправка координат на сервер (основной метод)
   Future<void> sendLocationToServer(double latitude, double longitude, {String source = 'Автоматическая'}) async {
     final now = DateTime.now();
     _logManager.log('ServerService: Sending location: lat=$latitude, lon=$longitude, source=$source');
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '21435';
+      
+      // 🌐 Проверяем наличие интернета
       final hasInternet = await _isInternetAvailable();
       if (!hasInternet) {
         _logManager.log('ServerService: No internet, saving to pending');
@@ -64,6 +69,7 @@ class ServerService {
         return;
       }
 
+      // ⏰ Проверяем, можно ли отправлять (рабочее время + GPS включен)
       final canSend = await _canSendLocation();
       if (!canSend) {
         _logManager.log('ServerService: Cannot send due to time or GPS, saving to pending');
@@ -71,19 +77,24 @@ class ServerService {
         return;
       }
 
+      // 📦 Формируем данные для отправки
       final data = {'user_id': userId, 'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)};
       await prefs.setString('last_location', jsonEncode({'latitude': latitude.toString(), 'longitude': longitude.toString()}));
 
+      // 🚀 Отправляем на сервер
       final response = await http.post(
         Uri.parse('$_baseUrl/hs/data/coordinates'),
         headers: {'Content-Type': 'application/json', 'Authorization': _auth},
         body: jsonEncode([data]),
-      ).timeout(const Duration(seconds: 10), onTimeout: () => throw Exception('Request timeout'));
+      ).timeout(
+        const Duration(seconds: 10), // ⏱️ 10 секунд - таймаут для отправки координат
+        onTimeout: () => throw Exception('Request timeout')
+      );
 
       if (response.statusCode == 200) {
         _lastSentTime = now;
         _logController.add('$source отправка: lat=$latitude, lon=$longitude, time=$now');
-        await _checkAndSendPendingData();
+        await _checkAndSendPendingData(); // Попытка отправить накопленные данные
       } else {
         _logManager.log('ServerService: Failed to send, status code: ${response.statusCode}');
         await _savePendingData(data);
@@ -94,6 +105,7 @@ class ServerService {
     }
   }
 
+  // 📦 Проверка и отправка накопленных данных (когда интернет появился)
   Future<void> _checkAndSendPendingData() async {
     _logManager.log('ServerService: Checking and sending pending data');
     if (_isSendingPendingData) return;
@@ -117,13 +129,15 @@ class ServerService {
     }
   }
 
+  // 📤 Отправка пакета накопленных координат
   Future<bool> _sendPendingBatch(List<Map<String, dynamic>> dataList) async {
     try {
       final response = await http.post(
         Uri.parse('$_baseUrl/hs/data/coordinates'),
         headers: {'Content-Type': 'application/json', 'Authorization': _auth},
         body: jsonEncode(dataList),
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 10)); // ⏱️ 10 секунд - таймаут для пакетной отправки
+      
       if (response.statusCode == 200) {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setStringList('pending_locations', []);
@@ -137,17 +151,21 @@ class ServerService {
     }
   }
 
+  // 🌐 Проверка доступности интернета
   Future<bool> _isInternetAvailable() async {
     try {
       final connectivityResult = await Connectivity().checkConnectivity();
       if (connectivityResult == ConnectivityResult.none) return false;
-      final response = await http.get(Uri.parse(_baseUrl)).timeout(const Duration(seconds: 5));
+      final response = await http.get(Uri.parse(_baseUrl)).timeout(
+        const Duration(seconds: 5) // ⏱️ 5 секунд - таймаут для проверки интернета
+      );
       return response.statusCode == 200;
     } catch (e) {
       return false;
     }
   }
 
+  // ⏰ Проверка, можно ли отправлять (GPS включен + в рабочее время)
   Future<bool> _canSendLocation() async {
     final prefs = await SharedPreferences.getInstance();
     final gps = prefs.getBool('gps') ?? true;
@@ -160,19 +178,24 @@ class ServerService {
     return gps && currentTimeInMinutes >= fromTimeInMinutes && currentTimeInMinutes < toTimeInMinutes;
   }
 
+  // 💾 Сохранение данных в очередь (когда нет интернета или нельзя отправить)
   Future<void> _savePendingData(Map<String, dynamic> data) async {
     final prefs = await SharedPreferences.getInstance();
     List<String> pendingData = prefs.getStringList('pending_locations') ?? [];
-    if (pendingData.length >= 10000) pendingData.removeAt(0);
+    if (pendingData.length >= 10000) pendingData.removeAt(0); // Ограничение на 10000 записей
     pendingData.add(jsonEncode(data));
     await prefs.setStringList('pending_locations', pendingData);
   }
 
+  // 🔧 Инициализация сервиса
   void init() {
     _logManager.log('ServerService: Initialization started');
     _checkAndSendPendingData();
+    
+    // ⏱️ 10 секунд - периодическая отправка последней сохранённой позиции
+    // (это резервный механизм, основная отправка происходит в repo.dart)
     _periodicSendTimer = Timer.periodic(const Duration(seconds: 10), (_) => _sendLatestLocation());
-    _logManager.log('ServerService: Initialization completed');
+    _logManager.log('ServerService: Initialization completed with 10-second periodic sender');
   }
 
   void dispose() {
@@ -180,12 +203,17 @@ class ServerService {
     _logController.close();
   }
 
+  // 📤 Отправка последней сохранённой позиции (резервный механизм)
   Future<void> _sendLatestLocation() async {
     final prefs = await SharedPreferences.getInstance();
     final lastLocationJson = prefs.getString('last_location');
     if (lastLocationJson != null) {
       final lastLocation = jsonDecode(lastLocationJson) as Map<String, dynamic>;
-      await sendLocationToServer(double.parse(lastLocation['latitude'] ?? '0.0'), double.parse(lastLocation['longitude'] ?? '0.0'), source: 'Periodic');
+      await sendLocationToServer(
+        double.parse(lastLocation['latitude'] ?? '0.0'), 
+        double.parse(lastLocation['longitude'] ?? '0.0'), 
+        source: 'Periodic' // Метка источника для логирования
+      );
     }
   }
 }

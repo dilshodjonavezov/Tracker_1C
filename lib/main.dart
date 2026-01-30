@@ -18,18 +18,20 @@ Future<void> main() async {
   await LocationDao().clear();
   print('Main: Cleared pending data on app start');
 
+  // 🔧 ИЗМЕНЕНО: Интервал получения GPS координат сокращён с 300 до 5 секунд
+  // 📍 trackingInterval = 5 секунд - как часто система запрашивает координаты GPS
   await BackgroundLocationTrackerManager.initialize(
     backgroundCallback,
     config: const BackgroundLocationTrackerConfig(
       loggingEnabled: true,
       androidConfig: AndroidConfig(
         notificationIcon: 'ic_launcher',
-        trackingInterval: Duration(seconds: 300),
-        distanceFilterMeters: 5.0,
+        trackingInterval: Duration(seconds: 5), // ⏱️ 5 секунд - получение GPS
+        distanceFilterMeters: 5.0, // 📏 5 метров - минимальное изменение расстояния
       ),
     ),
   );
-  print('Main: Background tracker initialized');
+  print('Main: Background tracker initialized with 5-second GPS interval');
 
   // ✅ Проверяем userId
   final prefs = await SharedPreferences.getInstance();
