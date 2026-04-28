@@ -10,10 +10,7 @@ class Repo {
   static Repo? _instance;
   final ServerService _serverService = ServerService();
   DateTime? _lastUpdateTime;
-  
-  // 🔧 ИЗМЕНЕНО: Убрано искусственное ограничение частоты обновлений
-  // Теперь каждое GPS обновление будет обрабатываться немедленно
-  // static const int _minUpdateIntervalSeconds = 300; // ❌ Удалено
+  static const int _minUpdateIntervalSeconds = 10;
 
   Repo._();
 
@@ -21,10 +18,12 @@ class Repo {
 
   Future<void> update(BackgroundLocationUpdateData data) async {
     final now = DateTime.now();
-    
-    // 🔧 ИЗМЕНЕНО: Удалена проверка минимального интервала
-    // Теперь координаты отправляются сразу при получении от GPS
-    // if (_lastUpdateTime != null && now.difference(_lastUpdateTime!).inSeconds < _minUpdateIntervalSeconds) return; // ❌ Удалено
+
+    // Ограничиваем частоту отправки, чтобы не раздувать суточный объём точек.
+    if (_lastUpdateTime != null &&
+        now.difference(_lastUpdateTime!).inSeconds < _minUpdateIntervalSeconds) {
+      return;
+    }
 
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id');
@@ -51,7 +50,7 @@ class Repo {
     // 💾 Сохраняем в локальную базу
     await LocationDao().saveLocation(data);
     
-    // 📤 Отправляем на сервер немедленно (без задержки)
+    // 📤 Отправляем на сервер после базовой фильтрации по частоте.
     await _serverService.sendLocationToServer(data.lat, data.lon);
     
     _lastUpdateTime = now;

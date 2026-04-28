@@ -1,7 +1,11 @@
 PODS:
   - background_location_tracker (0.0.1):
     - Flutter
+  - connectivity_plus (0.0.1):
+    - Flutter
   - Flutter (1.0.0)
+  - flutter_background_service_ios (0.0.3):
+    - Flutter
   - flutter_local_notifications (0.0.1):
     - Flutter
   - permission_handler_apple (9.3.0):
@@ -9,33 +13,47 @@ PODS:
   - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
+  - workmanager (0.0.1):
+    - Flutter
 
 DEPENDENCIES:
   - background_location_tracker (from `.symlinks/plugins/background_location_tracker/ios`)
+  - connectivity_plus (from `.symlinks/plugins/connectivity_plus/ios`)
   - Flutter (from `Flutter`)
+  - flutter_background_service_ios (from `.symlinks/plugins/flutter_background_service_ios/ios`)
   - flutter_local_notifications (from `.symlinks/plugins/flutter_local_notifications/ios`)
   - permission_handler_apple (from `.symlinks/plugins/permission_handler_apple/ios`)
   - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
+  - workmanager (from `.symlinks/plugins/workmanager/ios`)
 
 EXTERNAL SOURCES:
   background_location_tracker:
     :path: ".symlinks/plugins/background_location_tracker/ios"
+  connectivity_plus:
+    :path: ".symlinks/plugins/connectivity_plus/ios"
   Flutter:
     :path: Flutter
+  flutter_background_service_ios:
+    :path: ".symlinks/plugins/flutter_background_service_ios/ios"
   flutter_local_notifications:
     :path: ".symlinks/plugins/flutter_local_notifications/ios"
   permission_handler_apple:
     :path: ".symlinks/plugins/permission_handler_apple/ios"
   shared_preferences_foundation:
     :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
+  workmanager:
+    :path: ".symlinks/plugins/workmanager/ios"
 
 SPEC CHECKSUMS:
-  background_location_tracker: b8f5e416a4a2de95e6919f76e8b4e670c4086444
-  Flutter: e0871f40cf51350855a761d2e70bf5af5b9b5de7
-  flutter_local_notifications: 395056b3175ba4f08480a7c5de30cd36d69827e4
-  permission_handler_apple: 4ed2196e43d0651e8ff7ca3483a069d469701f2d
-  shared_preferences_foundation: 9e1978ff2562383bd5676f64ec4e9aa8fa06a6f7
+  background_location_tracker: 3f0954d5a839b9bfffbdc887e679d183a7bbc1c9
+  connectivity_plus: 2a701ffec2c0ae28a48cf7540e279787e77c447d
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  flutter_background_service_ios: e30e0d3ee69e4cee66272d0c78eacd48c2e94aac
+  flutter_local_notifications: df98d66e515e1ca797af436137b4459b160ad8c9
+  permission_handler_apple: 9878588469a2b0d0fc1e048d9f43605f92e6cec2
+  shared_preferences_foundation: fcdcbc04712aee1108ac7fda236f363274528f78
+  workmanager: 0afdcf5628bbde6924c21af7836fed07b42e30e6
 
-PODFILE CHECKSUM: 819463e6a0290f5a72f145ba7cde16e8b6ef0796
+PODFILE CHECKSUM: 4f1c12611da7338d21589c0b2ecd6bd20b109694
 
 COCOAPODS: 1.16.2

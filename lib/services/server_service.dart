@@ -4,17 +4,16 @@ import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:background_location_tracker_example/managers/log_manager.dart';
-import '../utils/utils.dart';
 
 class ServerService {
   static const String _baseUrl = 'http://192.168.88.249/MR';
+  static const String _coordinatesPath = '/hs/data/coordinates';
   static const String _username = 'testMobi';
   static const String _password = 'nE8vecon';
   final LogManager _logManager = LogManager();
   final _logController = StreamController<String>.broadcast();
   bool _isSendingPendingData = false;
-  DateTime? _lastSentTime;
-  Timer? _periodicSendTimer;
+  static const int _minDuplicateIntervalSeconds = 15;
   
   // Expose the log stream
   Stream<String> get logStream => _logController.stream;
@@ -34,18 +33,10 @@ class ServerService {
   Future<Map<String, dynamic>?> getUserStatus(String userId) async {
     _logManager.log('ServerService: Requesting user status for user_id=$userId');
     try {
-      final url = '$_baseUrl/hs/data/auth?user_id=$userId';
-      final headers = {'Authorization': _auth, 'Content-Type': 'application/json', 'Accept': 'application/json'};
-      _logManager.log('ServerService: GET request to $url');
-      _logManager.log('ServerService: Headers: $headers');
+      final primaryStatus = await _getUserStatusFromServer(_baseUrl, userId);
+      if (primaryStatus != null) return primaryStatus;
 
-      final response = await http.get(Uri.parse(url), headers: headers).timeout(
-        const Duration(seconds: 10), // ⏱️ 10 секунд - таймаут для запроса статуса
-        onTimeout: () => http.Response('Timeout', 408),
-      );
-
-      _logManager.log('ServerService: Response status: ${response.statusCode}');
-      if (response.statusCode == 200) return jsonDecode(response.body) as Map<String, dynamic>;
+      _logManager.log('ServerService: User status request failed on primary server');
       return null;
     } catch (e) {
       _logManager.log('ServerService: Exception during status request: $e');
@@ -60,12 +51,18 @@ class ServerService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '21435';
+      final data = {'user_id': userId, 'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)};
+
+      if (await _isDuplicateSend(prefs, latitude, longitude, now)) {
+        _logManager.log('ServerService: Duplicate location skipped');
+        return;
+      }
       
       // 🌐 Проверяем наличие интернета
       final hasInternet = await _isInternetAvailable();
       if (!hasInternet) {
         _logManager.log('ServerService: No internet, saving to pending');
-        await _savePendingData({'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)});
+        await _savePendingData(data);
         return;
       }
 
@@ -73,35 +70,32 @@ class ServerService {
       final canSend = await _canSendLocation();
       if (!canSend) {
         _logManager.log('ServerService: Cannot send due to time or GPS, saving to pending');
-        await _savePendingData({'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)});
+        await _savePendingData(data);
         return;
       }
 
       // 📦 Формируем данные для отправки
-      final data = {'user_id': userId, 'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)};
       await prefs.setString('last_location', jsonEncode({'latitude': latitude.toString(), 'longitude': longitude.toString()}));
 
-      // 🚀 Отправляем на сервер
-      final response = await http.post(
-        Uri.parse('$_baseUrl/hs/data/coordinates'),
-        headers: {'Content-Type': 'application/json', 'Authorization': _auth},
-        body: jsonEncode([data]),
-      ).timeout(
-        const Duration(seconds: 10), // ⏱️ 10 секунд - таймаут для отправки координат
-        onTimeout: () => throw Exception('Request timeout')
-      );
+      // 🚀 Отправляем только на основной сервер
+      final primaryOk = await _sendPrimary([data]);
 
-      if (response.statusCode == 200) {
-        _lastSentTime = now;
+      if (primaryOk) {
         _logController.add('$source отправка: lat=$latitude, lon=$longitude, time=$now');
+        await _markLastSent(prefs, latitude, longitude, now);
         await _checkAndSendPendingData(); // Попытка отправить накопленные данные
-      } else {
-        _logManager.log('ServerService: Failed to send, status code: ${response.statusCode}');
+      }
+
+      if (!primaryOk) {
+        _logManager.log('ServerService: Primary server unavailable, saving data for retry');
         await _savePendingData(data);
       }
     } catch (e) {
       _logManager.log('ServerService: Error sending location: $e');
-      await _savePendingData({'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)});
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? '21435';
+      final data = {'user_id': userId, 'latitude': latitude.toString(), 'longitude': longitude.toString(), 'date': _formatDateTime(now)};
+      await _savePendingData(data);
     }
   }
 
@@ -116,14 +110,14 @@ class ServerService {
       List<String> pendingData = prefs.getStringList('pending_locations') ?? [];
       if (pendingData.isEmpty) return;
 
-      final canSend = await _canSendLocation();
-      if (!canSend) return;
-
       List<Map<String, dynamic>> dataList = pendingData.map((s) => jsonDecode(s) as Map<String, dynamic>).where((d) => d.isNotEmpty).toList();
-      if (dataList.isEmpty) return;
 
-      int retryCount = 0;
-      while (retryCount < 3 && !await _sendPendingBatch(dataList)) retryCount++;
+      if (dataList.isNotEmpty) {
+        int retryCount = 0;
+        while (retryCount < 3 && !await _sendPendingBatch(dataList)) {
+          retryCount++;
+        }
+      }
     } finally {
       _isSendingPendingData = false;
     }
@@ -132,16 +126,10 @@ class ServerService {
   // 📤 Отправка пакета накопленных координат
   Future<bool> _sendPendingBatch(List<Map<String, dynamic>> dataList) async {
     try {
-      final response = await http.post(
-        Uri.parse('$_baseUrl/hs/data/coordinates'),
-        headers: {'Content-Type': 'application/json', 'Authorization': _auth},
-        body: jsonEncode(dataList),
-      ).timeout(const Duration(seconds: 10)); // ⏱️ 10 секунд - таймаут для пакетной отправки
-      
-      if (response.statusCode == 200) {
+      final sent = await _sendPrimary(dataList);
+      if (sent) {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setStringList('pending_locations', []);
-        _lastSentTime = DateTime.now();
         return true;
       }
       return false;
@@ -154,12 +142,11 @@ class ServerService {
   // 🌐 Проверка доступности интернета
   Future<bool> _isInternetAvailable() async {
     try {
-      final connectivityResult = await Connectivity().checkConnectivity();
-      if (connectivityResult == ConnectivityResult.none) return false;
-      final response = await http.get(Uri.parse(_baseUrl)).timeout(
-        const Duration(seconds: 5) // ⏱️ 5 секунд - таймаут для проверки интернета
-      );
-      return response.statusCode == 200;
+      final dynamic connectivityResult = await Connectivity().checkConnectivity();
+      if (connectivityResult is List<ConnectivityResult>) {
+        return connectivityResult.any((result) => result != ConnectivityResult.none);
+      }
+      return connectivityResult != ConnectivityResult.none;
     } catch (e) {
       return false;
     }
@@ -187,33 +174,81 @@ class ServerService {
     await prefs.setStringList('pending_locations', pendingData);
   }
 
+  Future<Map<String, dynamic>?> _getUserStatusFromServer(String baseUrl, String userId) async {
+    final url = '$baseUrl/hs/data/auth?user_id=$userId';
+    final headers = {'Authorization': _auth, 'Content-Type': 'application/json', 'Accept': 'application/json'};
+    _logManager.log('ServerService: GET request to $url');
+    _logManager.log('ServerService: Headers: $headers');
+
+    final response = await http.get(Uri.parse(url), headers: headers).timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => http.Response('Timeout', 408),
+    );
+
+    _logManager.log('ServerService: Response status from $baseUrl: ${response.statusCode}');
+    if (response.statusCode != 200) return null;
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  // ✅ Основной сервер с авторизацией
+  Future<bool> _sendPrimary(List<Map<String, dynamic>> dataList) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl$_coordinatesPath'),
+        headers: {'Content-Type': 'application/json', 'Authorization': _auth},
+        body: jsonEncode(dataList),
+      ).timeout(
+        const Duration(seconds: 10),
+        onTimeout: () => throw Exception('Request timeout'),
+      );
+      if (response.statusCode != 200) {
+        _logManager.log('ServerService: Primary send failed with status ${response.statusCode}');
+      }
+      return response.statusCode == 200;
+    } catch (e) {
+      _logManager.log('ServerService: Primary send error: $e');
+      return false;
+    }
+  }
+
   // 🔧 Инициализация сервиса
   void init() {
     _logManager.log('ServerService: Initialization started');
     _checkAndSendPendingData();
-    
-    // ⏱️ 10 секунд - периодическая отправка последней сохранённой позиции
-    // (это резервный механизм, основная отправка происходит в repo.dart)
-    _periodicSendTimer = Timer.periodic(const Duration(seconds: 10), (_) => _sendLatestLocation());
-    _logManager.log('ServerService: Initialization completed with 10-second periodic sender');
+    _logManager.log('ServerService: Initialization completed');
   }
 
   void dispose() {
-    _periodicSendTimer?.cancel();
     _logController.close();
   }
 
-  // 📤 Отправка последней сохранённой позиции (резервный механизм)
-  Future<void> _sendLatestLocation() async {
-    final prefs = await SharedPreferences.getInstance();
-    final lastLocationJson = prefs.getString('last_location');
-    if (lastLocationJson != null) {
-      final lastLocation = jsonDecode(lastLocationJson) as Map<String, dynamic>;
-      await sendLocationToServer(
-        double.parse(lastLocation['latitude'] ?? '0.0'), 
-        double.parse(lastLocation['longitude'] ?? '0.0'), 
-        source: 'Periodic' // Метка источника для логирования
-      );
-    }
+  Future<bool> _isDuplicateSend(
+    SharedPreferences prefs,
+    double latitude,
+    double longitude,
+    DateTime now,
+  ) async {
+    final lastSentAt = prefs.getString('last_sent_at');
+    final lastLatitude = prefs.getString('last_sent_latitude');
+    final lastLongitude = prefs.getString('last_sent_longitude');
+    if (lastSentAt == null || lastLatitude == null || lastLongitude == null) return false;
+
+    final sentAt = DateTime.tryParse(lastSentAt);
+    if (sentAt == null) return false;
+
+    final isSamePoint = lastLatitude == latitude.toString() && lastLongitude == longitude.toString();
+    final isTooSoon = now.difference(sentAt).inSeconds < _minDuplicateIntervalSeconds;
+    return isSamePoint && isTooSoon;
+  }
+
+  Future<void> _markLastSent(
+    SharedPreferences prefs,
+    double latitude,
+    double longitude,
+    DateTime now,
+  ) async {
+    await prefs.setString('last_sent_at', now.toIso8601String());
+    await prefs.setString('last_sent_latitude', latitude.toString());
+    await prefs.setString('last_sent_longitude', longitude.toString());
   }
 }
