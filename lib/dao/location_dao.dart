@@ -1,6 +1,5 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:background_location_tracker/background_location_tracker.dart';
-import '../utils/utils.dart';
 
 class LocationDao {
   static const _locationsKey = 'background_updated_locations';
@@ -15,14 +14,17 @@ class LocationDao {
     return '${dateTime.day}.${dateTime.month}.${dateTime.year} ${dateTime.hour}:${dateTime.minute}:${dateTime.second}';
   }
 
-  Future<SharedPreferences> get prefs async => await SharedPreferences.getInstance();
+  Future<SharedPreferences> get prefs async =>
+      await SharedPreferences.getInstance();
 
   Future<void> saveLocation(BackgroundLocationUpdateData data) async {
     final locations = await getLocations();
     final now = DateTime.now();
-    final locationString = '${_formatDateTime(now)} - Широта: ${data.lat.toStringAsFixed(6)}, Долгота: ${data.lon.toStringAsFixed(6)}';
+    final locationString =
+        '${_formatDateTime(now)} - Широта: ${data.lat.toStringAsFixed(6)}, Долгота: ${data.lon.toStringAsFixed(6)}';
     locations.add(locationString);
-    await (await prefs).setString(_locationsKey, locations.join(_locationSeparator));
+    await (await prefs)
+        .setString(_locationsKey, locations.join(_locationSeparator));
   }
 
   Future<List<String>> getLocations() async {
@@ -33,8 +35,6 @@ class LocationDao {
 
   Future<void> clear() async {
     final prefs = await this.prefs;
-    final userId = prefs.getString('user_id');
-    await prefs.clear();
-    if (userId != null) await prefs.setString('user_id', userId);
+    await prefs.remove(_locationsKey);
   }
 }
