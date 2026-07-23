@@ -1,382 +1,200 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:http/http.dart' as http;
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:background_location_tracker_example/dao/location_dao.dart';
 import 'package:background_location_tracker_example/managers/log_manager.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ServerService {
   static const String _baseUrl = 'http://192.168.88.249/MR';
   static const String _coordinatesPath = '/hs/data/coordinates';
   static const String _username = 'testMobi';
   static const String _password = 'nE8vecon';
-  static const int _maxPendingLocations = 100000;
+  static const int _batchSize = 250;
+  static const Duration _flushInterval = Duration(minutes: 10);
   static const int _minDiagnosticIntervalSeconds = 60;
   static const String _disabledLocationLatitude = '0.00000';
   static const String _disabledLocationLongitude = '0.00000';
+
+  static bool _isFlushing = false;
   final LogManager _logManager = LogManager();
   final _logController = StreamController<String>.broadcast();
-  bool _isSendingPendingData = false;
-  static const int _minDuplicateIntervalSeconds = 15;
 
-  // Expose the log stream
   Stream<String> get logStream => _logController.stream;
 
-  String get _auth {
-    final authString = '$_username:$_password';
-    final authEncoded = base64Encode(utf8.encode(authString));
-    _logManager.log('ServerService: Generated auth header: Basic $authEncoded');
-    return 'Basic $authEncoded';
-  }
+  String get _auth =>
+      'Basic ${base64Encode(utf8.encode('$_username:$_password'))}';
 
-  String _formatDateTime(DateTime dateTime) {
-    return '${dateTime.year}-${dateTime.month.toString().padLeft(2, '0')}-${dateTime.day.toString().padLeft(2, '0')}T${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}';
-  }
+  String _formatDateTime(DateTime dateTime) =>
+      '${dateTime.year}-${dateTime.month.toString().padLeft(2, '0')}-${dateTime.day.toString().padLeft(2, '0')}T${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}';
 
-  // 🔍 Получение статуса пользователя с сервера (включен ли GPS, рабочее время)
   Future<Map<String, dynamic>?> getUserStatus(String userId) async {
-    _logManager
-        .log('ServerService: Requesting user status for user_id=$userId');
     try {
-      final primaryStatus = await _getUserStatusFromServer(_baseUrl, userId);
-      if (primaryStatus != null) return primaryStatus;
-
-      _logManager
-          .log('ServerService: User status request failed on primary server');
-      return null;
+      final response = await http.get(
+        Uri.parse('$_baseUrl/hs/data/auth?user_id=$userId'),
+        headers: {'Authorization': _auth, 'Accept': 'application/json'},
+      ).timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) return null;
+      return jsonDecode(response.body) as Map<String, dynamic>;
     } catch (e) {
-      _logManager.log('ServerService: Exception during status request: $e');
+      _logManager.log('ServerService: status request failed: $e');
       return null;
     }
   }
 
-  // 📤 Отправка координат на сервер (основной метод)
+  /// Called after a sample is written. A sample is never sent directly.
+  Future<void> maybeFlushPendingLocations({bool force = false}) async {
+    if (_isFlushing) return;
+    final prefs = await SharedPreferences.getInstance();
+    final last = prefs.getInt('last_location_flush_at') ?? 0;
+    final due = DateTime.now().millisecondsSinceEpoch - last >=
+        _flushInterval.inMilliseconds;
+    if (!force && !due) return;
+    await flushPendingLocations(force: force);
+  }
+
+  /// Sends bounded sequential batches. At 5-second collection this is about
+  /// 120 records per 10 minutes, so one request normally covers one interval.
+  /// A larger backlog is drained in 250-record requests, never as one huge JSON.
+  Future<void> flushPendingLocations({bool force = false}) async {
+    if (_isFlushing) return;
+    _isFlushing = true;
+    final dao = LocationDao();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!await _canSendLocation()) return;
+      if (!await _isInternetAvailable()) return;
+
+      await prefs.setInt(
+          'last_location_flush_at', DateTime.now().millisecondsSinceEpoch);
+
+      // Limit work per wake-up. This protects both device battery and server
+      // during long offline periods; the next 10-minute wake-up continues.
+      for (var batchNumber = 0; batchNumber < 20; batchNumber++) {
+        final rows = await dao.claimPendingBatch(
+          limit: _batchSize,
+          lease: const Duration(minutes: 5),
+        );
+        if (rows.isEmpty) break;
+
+        final ids = rows.map((row) => row['id'] as int).toList();
+        final payload = rows.map(_serverPayload).toList();
+        final sent = await _sendPrimary(payload);
+        if (sent) {
+          await dao.deleteBatch(ids);
+          _logController.add('Отправлен пакет GPS: ${ids.length} записей');
+        } else {
+          await dao.releaseBatch(ids);
+          break;
+        }
+      }
+    } catch (e) {
+      _logManager.log('ServerService: flush failed: $e');
+    } finally {
+      _isFlushing = false;
+    }
+  }
+
+  Map<String, dynamic> _serverPayload(Map<String, dynamic> row) => {
+        // Keep the payload compatible with the existing backend contract.
+        // Extended GPS metadata remains safely stored in the local SQLite
+        // journal, but is not sent because the backend is unchanged.
+        'user_id': row['user_id'],
+        'latitude': (row['latitude'] as num).toDouble().toString(),
+        'longitude': (row['longitude'] as num).toDouble().toString(),
+        'date': _formatDateTime(
+          DateTime.fromMillisecondsSinceEpoch(row['captured_at'] as int),
+        ),
+      };
+
+  /// Legacy entry point kept for callers outside Repo. It now journals first.
   Future<void> sendLocationToServer(double latitude, double longitude,
       {String source = 'Автоматическая'}) async {
-    final now = DateTime.now();
     _logManager.log(
-        'ServerService: Sending location: lat=$latitude, lon=$longitude, source=$source');
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id') ?? '21435';
-      final data = {
-        'user_id': userId,
-        'latitude': latitude.toString(),
-        'longitude': longitude.toString(),
-        'date': _formatDateTime(now)
-      };
-
-      if (await _isDuplicateSend(prefs, latitude, longitude, now)) {
-        _logManager.log('ServerService: Duplicate location skipped');
-        return;
-      }
-
-      // 🌐 Проверяем наличие интернета
-      final hasInternet = await _isInternetAvailable();
-      if (!hasInternet) {
-        _logManager.log('ServerService: No internet, saving to pending');
-        await _savePendingData(data);
-        return;
-      }
-
-      // ⏰ Проверяем, можно ли отправлять (рабочее время + GPS включен)
-      final canSend = await _canSendLocation();
-      if (!canSend) {
-        _logManager.log(
-            'ServerService: Cannot send due to time or GPS, saving to pending');
-        await _savePendingData(data);
-        return;
-      }
-
-      // 📦 Формируем данные для отправки
-      await prefs.setString(
-          'last_location',
-          jsonEncode({
-            'latitude': latitude.toString(),
-            'longitude': longitude.toString()
-          }));
-
-      // 🚀 Отправляем только на основной сервер
-      final primaryOk = await _sendPrimary([data]);
-
-      if (primaryOk) {
-        _logController
-            .add('$source отправка: lat=$latitude, lon=$longitude, time=$now');
-        await _markLastSent(prefs, latitude, longitude, now);
-        await _checkAndSendPendingData(); // Попытка отправить накопленные данные
-      }
-
-      if (!primaryOk) {
-        _logManager.log(
-            'ServerService: Primary server unavailable, saving data for retry');
-        await _savePendingData(data);
-      }
-    } catch (e) {
-      _logManager.log('ServerService: Error sending location: $e');
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id') ?? '21435';
-      final data = {
-        'user_id': userId,
-        'latitude': latitude.toString(),
-        'longitude': longitude.toString(),
-        'date': _formatDateTime(now)
-      };
-      await _savePendingData(data);
-    }
+        'ServerService: direct location call ignored in favor of local journal');
+    await maybeFlushPendingLocations();
   }
 
   Future<void> sendLocationDisabledSignal(
       {String source = 'Геолокация выключена'}) async {
     final now = DateTime.now();
-    _logManager
-        .log('ServerService: Sending disabled location signal, source=$source');
-
     try {
       final prefs = await SharedPreferences.getInstance();
-      final lastSignalAt = prefs.getString('last_location_disabled_signal_at');
-      final parsedLastSignalAt =
-          lastSignalAt == null ? null : DateTime.tryParse(lastSignalAt);
-      if (parsedLastSignalAt != null &&
-          now.difference(parsedLastSignalAt).inSeconds <
-              _minDiagnosticIntervalSeconds) {
-        _logManager
-            .log('ServerService: Disabled location signal skipped by interval');
+      final last = prefs.getString('last_location_disabled_signal_at');
+      final lastAt = last == null ? null : DateTime.tryParse(last);
+      if (lastAt != null &&
+          now.difference(lastAt).inSeconds < _minDiagnosticIntervalSeconds) {
         return;
       }
-
       final userId = prefs.getString('user_id');
       if (userId == null || userId.isEmpty) return;
+      if (!await _isInternetAvailable() || !await _canSendLocation()) return;
 
-      final data = {
-        'user_id': userId,
-        'latitude': _disabledLocationLatitude,
-        'longitude': _disabledLocationLongitude,
-        'date': _formatDateTime(now),
-      };
-
-      final hasInternet = await _isInternetAvailable();
-      if (!hasInternet) {
-        _logManager.log(
-            'ServerService: No internet, saving disabled location signal to pending');
-        await _savePendingData(data);
-        await prefs.setString(
-            'last_location_disabled_signal_at', now.toIso8601String());
-        return;
-      }
-
-      final canSend = await _canSendLocation();
-      if (!canSend) {
-        _logManager.log(
-            'ServerService: Disabled location signal skipped due to server GPS flag or time window');
-        return;
-      }
-
-      final sent = await _sendPrimary([data]);
-      if (sent) {
-        _logController.add(
-            '$source: lat=$_disabledLocationLatitude, lon=$_disabledLocationLongitude, time=$now');
-        await prefs.setString(
-            'last_location_disabled_signal_at', now.toIso8601String());
-        await _checkAndSendPendingData();
-      } else {
-        _logManager.log(
-            'ServerService: Server unavailable, saving disabled location signal to pending');
-        await _savePendingData(data);
-        await prefs.setString(
-            'last_location_disabled_signal_at', now.toIso8601String());
-      }
-    } catch (e) {
-      _logManager
-          .log('ServerService: Error sending disabled location signal: $e');
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id');
-      if (userId == null || userId.isEmpty) return;
-
-      await _savePendingData({
-        'user_id': userId,
-        'latitude': _disabledLocationLatitude,
-        'longitude': _disabledLocationLongitude,
-        'date': _formatDateTime(now),
-      });
-      await prefs.setString(
-          'last_location_disabled_signal_at', now.toIso8601String());
-    }
-  }
-
-  // 📦 Проверка и отправка накопленных данных (когда интернет появился)
-  Future<void> _checkAndSendPendingData() async {
-    _logManager.log('ServerService: Checking and sending pending data');
-    if (_isSendingPendingData) return;
-    _isSendingPendingData = true;
-
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      List<String> pendingData = prefs.getStringList('pending_locations') ?? [];
-      if (pendingData.isEmpty) return;
-
-      List<Map<String, dynamic>> dataList = pendingData
-          .map((s) => jsonDecode(s) as Map<String, dynamic>)
-          .where((d) => d.isNotEmpty)
-          .toList();
-
-      if (dataList.isNotEmpty) {
-        int retryCount = 0;
-        while (retryCount < 3 && !await _sendPendingBatch(dataList)) {
-          retryCount++;
+      final sent = await _sendPrimary([
+        {
+          'user_id': userId,
+          'latitude': _disabledLocationLatitude,
+          'longitude': _disabledLocationLongitude,
+          'date': _formatDateTime(now),
         }
-      }
-    } finally {
-      _isSendingPendingData = false;
-    }
-  }
-
-  // 📤 Отправка пакета накопленных координат
-  Future<bool> _sendPendingBatch(List<Map<String, dynamic>> dataList) async {
-    try {
-      final sent = await _sendPrimary(dataList);
+      ]);
       if (sent) {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setStringList('pending_locations', []);
-        return true;
+        await prefs.setString(
+            'last_location_disabled_signal_at', now.toIso8601String());
+        _logController.add('$source: $now');
       }
-      return false;
     } catch (e) {
-      _logManager.log('ServerService: Error sending pending batch: $e');
-      return false;
+      _logManager.log('ServerService: disabled signal failed: $e');
     }
   }
 
-  // 🌐 Проверка доступности интернета
   Future<bool> _isInternetAvailable() async {
     try {
-      final dynamic connectivityResult =
-          await Connectivity().checkConnectivity();
-      if (connectivityResult is List<ConnectivityResult>) {
-        return connectivityResult
-            .any((result) => result != ConnectivityResult.none);
-      }
-      return connectivityResult != ConnectivityResult.none;
-    } catch (e) {
+      final result = await Connectivity().checkConnectivity();
+      return result.any((item) => item != ConnectivityResult.none);
+    } catch (_) {
       return false;
     }
   }
 
-  // ⏰ Проверка, можно ли отправлять (GPS включен + в рабочее время)
   Future<bool> _canSendLocation() async {
     final prefs = await SharedPreferences.getInstance();
-    final gps = prefs.getBool('gps') ?? true;
-    final from =
-        DateTime.parse(prefs.getString('from') ?? '0001-01-01T08:00:00');
-    final to = DateTime.parse(prefs.getString('to') ?? '0001-01-01T18:00:00');
-    final now = DateTime.now();
-    final currentTimeInMinutes = now.hour * 60 + now.minute;
-    final fromTimeInMinutes = from.hour * 60 + from.minute;
-    final toTimeInMinutes = to.hour * 60 + to.minute;
-    return gps &&
-        currentTimeInMinutes >= fromTimeInMinutes &&
-        currentTimeInMinutes < toTimeInMinutes;
+    return prefs.getBool('gps') ?? true;
   }
 
-  // 💾 Сохранение данных в очередь (когда нет интернета или нельзя отправить)
-  Future<void> _savePendingData(Map<String, dynamic> data) async {
-    final prefs = await SharedPreferences.getInstance();
-    List<String> pendingData = prefs.getStringList('pending_locations') ?? [];
-    if (pendingData.length >= _maxPendingLocations) pendingData.removeAt(0);
-    pendingData.add(jsonEncode(data));
-    await prefs.setStringList('pending_locations', pendingData);
-  }
-
-  Future<Map<String, dynamic>?> _getUserStatusFromServer(
-      String baseUrl, String userId) async {
-    final url = '$baseUrl/hs/data/auth?user_id=$userId';
-    final headers = {
-      'Authorization': _auth,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    };
-    _logManager.log('ServerService: GET request to $url');
-    _logManager.log('ServerService: Headers: $headers');
-
-    final response = await http.get(Uri.parse(url), headers: headers).timeout(
-          const Duration(seconds: 10),
-          onTimeout: () => http.Response('Timeout', 408),
-        );
-
-    _logManager.log(
-        'ServerService: Response status from $baseUrl: ${response.statusCode}');
-    if (response.statusCode != 200) return null;
-    return jsonDecode(response.body) as Map<String, dynamic>;
-  }
-
-  // ✅ Основной сервер с авторизацией
   Future<bool> _sendPrimary(List<Map<String, dynamic>> dataList) async {
+    if (dataList.isEmpty) return true;
     try {
       final response = await http
           .post(
             Uri.parse('$_baseUrl$_coordinatesPath'),
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': _auth
+              'Authorization': _auth,
+              'Accept': 'application/json',
             },
             body: jsonEncode(dataList),
           )
-          .timeout(
-            const Duration(seconds: 10),
-            onTimeout: () => throw Exception('Request timeout'),
-          );
-      if (response.statusCode != 200) {
+          .timeout(const Duration(seconds: 20));
+      final ok = response.statusCode >= 200 && response.statusCode < 300;
+      if (!ok) {
         _logManager.log(
-            'ServerService: Primary send failed with status ${response.statusCode}');
+            'ServerService: batch failed ${response.statusCode} (${dataList.length} records)');
       }
-      return response.statusCode == 200;
+      return ok;
     } catch (e) {
-      _logManager.log('ServerService: Primary send error: $e');
+      _logManager.log('ServerService: batch request failed: $e');
       return false;
     }
   }
 
-  // 🔧 Инициализация сервиса
   void init() {
-    _logManager.log('ServerService: Initialization started');
-    _checkAndSendPendingData();
-    _logManager.log('ServerService: Initialization completed');
+    maybeFlushPendingLocations(force: true);
   }
 
   void dispose() {
     _logController.close();
-  }
-
-  Future<bool> _isDuplicateSend(
-    SharedPreferences prefs,
-    double latitude,
-    double longitude,
-    DateTime now,
-  ) async {
-    final lastSentAt = prefs.getString('last_sent_at');
-    final lastLatitude = prefs.getString('last_sent_latitude');
-    final lastLongitude = prefs.getString('last_sent_longitude');
-    if (lastSentAt == null || lastLatitude == null || lastLongitude == null) {
-      return false;
-    }
-
-    final sentAt = DateTime.tryParse(lastSentAt);
-    if (sentAt == null) return false;
-
-    final isSamePoint = lastLatitude == latitude.toString() &&
-        lastLongitude == longitude.toString();
-    final isTooSoon =
-        now.difference(sentAt).inSeconds < _minDuplicateIntervalSeconds;
-    return isSamePoint && isTooSoon;
-  }
-
-  Future<void> _markLastSent(
-    SharedPreferences prefs,
-    double latitude,
-    double longitude,
-    DateTime now,
-  ) async {
-    await prefs.setString('last_sent_at', now.toIso8601String());
-    await prefs.setString('last_sent_latitude', latitude.toString());
-    await prefs.setString('last_sent_longitude', longitude.toString());
   }
 }

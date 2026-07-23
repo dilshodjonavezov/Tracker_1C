@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:workmanager/workmanager.dart';
 
 import 'services/location_diagnostic_service.dart';
+import 'services/server_service.dart';
 
 const locationDiagnosticTaskName = 'location_diagnostic_task';
 const locationDiagnosticUniqueName = 'location_diagnostic_unique_task';
@@ -14,6 +15,7 @@ void diagnosticCallbackDispatcher() {
     WidgetsFlutterBinding.ensureInitialized();
     DartPluginRegistrant.ensureInitialized();
 
+    await ServerService().flushPendingLocations(force: true);
     await LocationDiagnosticService().checkAndReport();
     return true;
   });

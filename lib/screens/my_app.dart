@@ -8,6 +8,7 @@ import 'package:background_location_tracker/background_location_tracker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:background_location_tracker_example/services/location_diagnostic_service.dart';
 import 'package:background_location_tracker_example/services/server_service.dart';
+import 'package:background_location_tracker_example/services/tracking_config.dart';
 
 class MyApp extends StatefulWidget {
   const MyApp({Key? key}) : super(key: key);
@@ -21,6 +22,7 @@ class MyAppState extends State<MyApp> {
   Timer? _timer;
   Timer? _statusCheckTimer;
   Timer? _locationDiagnosticTimer;
+  Timer? _locationSyncTimer;
   List<String> _locations = [];
   final ServerService _serverService = ServerService();
   late final LocationDiagnosticService _locationDiagnosticService =
@@ -38,6 +40,7 @@ class MyAppState extends State<MyApp> {
         _serverService.init();
         _startStatusCheckTimer();
         _startLocationDiagnosticTimer();
+        _startLocationSyncTimer();
         _subscribeToLogStream();
       }
     });
@@ -57,6 +60,7 @@ class MyAppState extends State<MyApp> {
     _timer?.cancel();
     _statusCheckTimer?.cancel();
     _locationDiagnosticTimer?.cancel();
+    _locationSyncTimer?.cancel();
     _logSubscription?.cancel();
     _serverService.dispose();
     super.dispose();
@@ -75,7 +79,15 @@ class MyAppState extends State<MyApp> {
     _statusCheckTimer?.cancel();
     _checkUserStatus();
     _statusCheckTimer =
-        Timer.periodic(const Duration(hours: 8), (_) => _checkUserStatus());
+        Timer.periodic(const Duration(minutes: 15), (_) => _checkUserStatus());
+  }
+
+  void _startLocationSyncTimer() {
+    _locationSyncTimer?.cancel();
+    _locationSyncTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _serverService.maybeFlushPendingLocations(),
+    );
   }
 
   Future<void> _checkUserStatus() async {
@@ -91,20 +103,15 @@ class MyAppState extends State<MyApp> {
         await prefs.setBool('gps', status['gps'] ?? true);
         await prefs.setString('from', status['from'] ?? '0001-01-01T08:00:00');
         await prefs.setString('to', status['to'] ?? '0001-01-01T18:00:00');
-        final now = DateTime.now();
-        final fromTime =
-            DateTime.parse(status['from'] ?? '0001-01-01T08:00:00');
-        final toTime = DateTime.parse(status['to'] ?? '0001-01-01T18:00:00');
-        final isInTimeWindow = now.hour * 60 + now.minute >=
-                fromTime.hour * 60 + fromTime.minute &&
-            now.hour * 60 + now.minute < toTime.hour * 60 + toTime.minute;
-        if (!(status['gps'] ?? true) || !isInTimeWindow) {
+        if (!(status['gps'] ?? true)) {
           if (isTracking) {
             await BackgroundLocationTrackerManager.stopTracking();
             setState(() => isTracking = false);
           }
         } else if (!isTracking) {
-          await BackgroundLocationTrackerManager.startTracking();
+          await BackgroundLocationTrackerManager.startTracking(
+            config: trackerAndroidConfig,
+          );
           setState(() => isTracking = true);
         }
       }
@@ -192,14 +199,15 @@ class MyAppState extends State<MyApp> {
                             label: Text(isTracking ? 'Остановить' : 'Начать'),
                             onPressed: isTracking
                                 ? () async {
-                                    await LocationDao().clear();
                                     await BackgroundLocationTrackerManager
                                         .stopTracking();
                                     setState(() => isTracking = false);
                                   }
                                 : () async {
                                     await BackgroundLocationTrackerManager
-                                        .startTracking();
+                                        .startTracking(
+                                      config: trackerAndroidConfig,
+                                    );
                                     setState(() => isTracking = true);
                                   },
                             style: ElevatedButton.styleFrom(
@@ -292,7 +300,10 @@ class MyAppState extends State<MyApp> {
         await BackgroundLocationTrackerManager.isTracking();
     setState(() => isTracking = isTrackingActive);
     if (!isTrackingActive) {
-      await BackgroundLocationTrackerManager.startTracking();
+      await BackgroundLocationTrackerManager.startTracking(
+        config: trackerAndroidConfig,
+      );
+      setState(() => isTracking = true);
     }
   }
 

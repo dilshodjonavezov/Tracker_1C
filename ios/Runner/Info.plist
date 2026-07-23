@@ -24,6 +24,16 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Приложению нужна геолокация для фонового учета маршрута устройства.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Приложению нужна геолокация для фонового учета маршрута устройства.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Приложению нужна геолокация для учета маршрута устройства.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

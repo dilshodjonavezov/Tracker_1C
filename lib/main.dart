@@ -9,7 +9,7 @@ import 'background_callback.dart';
 import 'diagnostic_callback.dart';
 import 'screens/user_id_input_screen.dart';
 import 'screens/my_app.dart';
-import 'dao/location_dao.dart';
+import 'services/tracking_config.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,22 +18,10 @@ Future<void> main() async {
   // ✅ Сначала инициализируем всё ПЕРЕД runApp
   await PermissionManager.requestAllPermissions();
 
-  await LocationDao().clear();
-  print('Main: Cleared visible location history on app start');
-
-  // 🔧 ИЗМЕНЕНО: Интервал получения GPS координат сокращён с 300 до 5 секунд
-  // 📍 trackingInterval = 5 секунд - как часто система запрашивает координаты GPS
+  // GPS collection remains frequent; uploads are decoupled and batched.
   await BackgroundLocationTrackerManager.initialize(
     backgroundCallback,
-    config: const BackgroundLocationTrackerConfig(
-      loggingEnabled: true,
-      androidConfig: AndroidConfig(
-        notificationIcon: 'ic_launcher',
-        trackingInterval: Duration(seconds: 5), // ⏱️ 5 секунд - получение GPS
-        distanceFilterMeters:
-            5.0, // 📏 5 метров - минимальное изменение расстояния
-      ),
-    ),
+    config: trackerLocationConfig,
   );
   print('Main: Background tracker initialized with 5-second GPS interval');
 
