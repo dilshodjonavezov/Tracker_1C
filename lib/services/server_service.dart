@@ -9,6 +9,10 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ServerService {
+  // Старая версия у клиента (1С / MR):
+  // static const String _baseUrl = 'http://192.168.88.249/MR';
+  // static const String _username = 'testMobi';
+  // static const String _password = 'nE8vecon';
   static const String _baseUrl = 'http://169.58.181.154';
   static const String _coordinatesPath = '/hs/data/coordinates';
   static const String _username = 'API_USER';
