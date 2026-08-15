@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:background_location_tracker_example/services/location_diagnostic_service.dart';
 import 'package:background_location_tracker_example/services/server_service.dart';
 import 'package:background_location_tracker_example/services/tracking_config.dart';
+import 'package:background_location_tracker_example/screens/location_report_screen.dart';
 
 class MyApp extends StatefulWidget {
   const MyApp({Key? key}) : super(key: key);
@@ -103,6 +104,10 @@ class MyAppState extends State<MyApp> {
         await prefs.setBool('gps', status['gps'] ?? true);
         await prefs.setString('from', status['from'] ?? '0001-01-01T08:00:00');
         await prefs.setString('to', status['to'] ?? '0001-01-01T18:00:00');
+        final userName = _extractUserName(status);
+        if (userName != null) {
+          await prefs.setString('user_name', userName);
+        }
         if (!(status['gps'] ?? true)) {
           if (isTracking) {
             await BackgroundLocationTrackerManager.stopTracking();
@@ -162,6 +167,13 @@ class MyAppState extends State<MyApp> {
             backgroundColor: Colors.transparent,
             centerTitle: true,
             actions: [
+              IconButton(
+                  icon: const Icon(Icons.calendar_month, color: Colors.white),
+                  onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const LocationReportScreen())),
+                  tooltip: 'Отчёт GPS'),
               IconButton(
                   icon: const Icon(Icons.list_alt, color: Colors.white),
                   onPressed: () => Navigator.push(context,
@@ -244,14 +256,6 @@ class MyAppState extends State<MyApp> {
                                       fontWeight: FontWeight.bold,
                                       color: Colors.teal),
                                   overflow: TextOverflow.ellipsis)),
-                          if (_locations.isNotEmpty)
-                            TextButton(
-                                onPressed: () async {
-                                  await LocationDao().clear();
-                                  setState(() => _locations = []);
-                                },
-                                child: const Text('Очистить',
-                                    style: TextStyle(color: Colors.red))),
                         ],
                       ),
                       const SizedBox(height: 8),
@@ -293,6 +297,21 @@ class MyAppState extends State<MyApp> {
         ),
       ),
     );
+  }
+
+  String? _extractUserName(Map<String, dynamic> status) {
+    const possibleKeys = [
+      'name',
+      'user_name',
+      'full_name',
+      'fio',
+      'agent_name',
+    ];
+    for (final key in possibleKeys) {
+      final value = status[key]?.toString().trim();
+      if (value != null && value.isNotEmpty) return value;
+    }
+    return null;
   }
 
   Future<void> _getTrackingStatus() async {

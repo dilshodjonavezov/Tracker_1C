@@ -32,7 +32,8 @@ Future<void> main() async {
         locationDiagnosticUniqueName,
         locationDiagnosticTaskName,
         frequency: const Duration(minutes: 15),
-        constraints: Constraints(networkType: NetworkType.connected),
+        // Device-state events must be journaled even without internet/VPN.
+        constraints: Constraints(networkType: NetworkType.not_required),
         existingWorkPolicy: ExistingWorkPolicy.update,
       );
       print('Main: Location diagnostic background task registered');

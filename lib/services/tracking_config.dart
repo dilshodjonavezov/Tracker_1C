@@ -7,7 +7,10 @@ const trackerAndroidConfig = AndroidConfig(
   enableNotificationLocationUpdates: false,
   enableCancelTrackingAction: false,
   trackingInterval: Duration(seconds: 5),
-  distanceFilterMeters: 5.0,
+  // Do not suppress time-based samples while the device moves less than 5 m.
+  // Android may still adjust the cadence for power/OS reasons, but this keeps
+  // our request consistent with the required five-second collection interval.
+  distanceFilterMeters: 0,
 );
 
 const trackerLocationConfig = BackgroundLocationTrackerConfig(
@@ -15,7 +18,7 @@ const trackerLocationConfig = BackgroundLocationTrackerConfig(
   androidConfig: trackerAndroidConfig,
   iOSConfig: IOSConfig(
     activityType: ActivityType.NAVIGATION,
-    distanceFilterMeters: 5,
+    distanceFilterMeters: 0,
     restartAfterKill: true,
   ),
 );

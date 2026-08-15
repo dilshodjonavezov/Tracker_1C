@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:background_location_tracker_example/dao/location_dao.dart';
 import 'package:background_location_tracker_example/managers/log_manager.dart';
@@ -8,17 +9,19 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ServerService {
-  static const String _baseUrl = 'http://192.168.88.249/MR';
+  static const String _baseUrl = 'http://169.58.181.154';
   static const String _coordinatesPath = '/hs/data/coordinates';
-  static const String _username = 'testMobi';
-  static const String _password = 'nE8vecon';
+  static const String _username = 'API_USER';
+  static const String _password = 'API_PASSWORD';
   static const int _batchSize = 250;
   static const Duration _flushInterval = Duration(minutes: 10);
   static const int _minDiagnosticIntervalSeconds = 60;
   static const String _disabledLocationLatitude = '0.00000';
   static const String _disabledLocationLongitude = '0.00000';
+  static const int _maxStoredResponseLength = 2000;
 
   static bool _isFlushing = false;
+  static Completer<void>? _flushCompleter;
   final LogManager _logManager = LogManager();
   final _logController = StreamController<String>.broadcast();
 
@@ -59,16 +62,41 @@ class ServerService {
   /// 120 records per 10 minutes, so one request normally covers one interval.
   /// A larger backlog is drained in 250-record requests, never as one huge JSON.
   Future<void> flushPendingLocations({bool force = false}) async {
-    if (_isFlushing) return;
+    if (_isFlushing) {
+      await _flushCompleter?.future;
+      return;
+    }
     _isFlushing = true;
+    final completer = Completer<void>();
+    _flushCompleter = completer;
     final dao = LocationDao();
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (!await _canSendLocation()) return;
-      if (!await _isInternetAvailable()) return;
-
+      final attemptedAt = DateTime.now();
+      // Record the attempt before network checks so a disconnected phone does
+      // not retry every five-second GPS callback.
       await prefs.setInt(
-          'last_location_flush_at', DateTime.now().millisecondsSinceEpoch);
+        'last_location_flush_at',
+        attemptedAt.millisecondsSinceEpoch,
+      );
+      if (!await _canSendLocation()) {
+        await dao.annotatePendingFailure(
+          attemptedAt: attemptedAt,
+          errorCode: 'GPS_DISABLED_BY_SERVER',
+          message: 'Отправка GPS отключена настройкой сервера',
+          owner: 'Сервер',
+        );
+        return;
+      }
+      if (!await _isInternetAvailable()) {
+        await dao.annotatePendingFailure(
+          attemptedAt: attemptedAt,
+          errorCode: 'NO_NETWORK',
+          message: 'Нет подключения к интернету или VPN',
+          owner: 'Телефон/сеть',
+        );
+        return;
+      }
 
       // Limit work per wake-up. This protects both device battery and server
       // during long offline periods; the next 10-minute wake-up continues.
@@ -81,12 +109,28 @@ class ServerService {
 
         final ids = rows.map((row) => row['id'] as int).toList();
         final payload = rows.map(_serverPayload).toList();
-        final sent = await _sendPrimary(payload);
-        if (sent) {
-          await dao.deleteBatch(ids);
+        final result = await _sendPrimary(payload);
+        if (result.isSuccess) {
+          await dao.markBatchSent(
+            ids,
+            sentAt: DateTime.now(),
+            httpStatus: result.httpStatus,
+            serverResponse: result.serverResponse,
+          );
           _logController.add('Отправлен пакет GPS: ${ids.length} записей');
         } else {
-          await dao.releaseBatch(ids);
+          await dao.markBatchFailed(
+            ids,
+            attemptedAt: DateTime.now(),
+            errorCode: result.code,
+            message: result.message,
+            owner: result.owner,
+            httpStatus: result.httpStatus,
+            serverResponse: result.serverResponse,
+          );
+          _logController.add(
+            'Пакет GPS не отправлен: ${result.message} (${result.owner})',
+          );
           break;
         }
       }
@@ -94,6 +138,8 @@ class ServerService {
       _logManager.log('ServerService: flush failed: $e');
     } finally {
       _isFlushing = false;
+      if (!completer.isCompleted) completer.complete();
+      if (identical(_flushCompleter, completer)) _flushCompleter = null;
     }
   }
 
@@ -132,7 +178,7 @@ class ServerService {
       if (userId == null || userId.isEmpty) return;
       if (!await _isInternetAvailable() || !await _canSendLocation()) return;
 
-      final sent = await _sendPrimary([
+      final result = await _sendPrimary([
         {
           'user_id': userId,
           'latitude': _disabledLocationLatitude,
@@ -140,7 +186,7 @@ class ServerService {
           'date': _formatDateTime(now),
         }
       ]);
-      if (sent) {
+      if (result.isSuccess) {
         await prefs.setString(
             'last_location_disabled_signal_at', now.toIso8601String());
         _logController.add('$source: $now');
@@ -164,8 +210,8 @@ class ServerService {
     return prefs.getBool('gps') ?? true;
   }
 
-  Future<bool> _sendPrimary(List<Map<String, dynamic>> dataList) async {
-    if (dataList.isEmpty) return true;
+  Future<SendResult> _sendPrimary(List<Map<String, dynamic>> dataList) async {
+    if (dataList.isEmpty) return SendResult.success();
     try {
       final response = await http
           .post(
@@ -178,16 +224,53 @@ class ServerService {
             body: jsonEncode(dataList),
           )
           .timeout(const Duration(seconds: 20));
-      final ok = response.statusCode >= 200 && response.statusCode < 300;
-      if (!ok) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return SendResult.success(
+          httpStatus: response.statusCode,
+          serverResponse: _safeResponseBody(response.body),
+        );
+      }
+
+      final result = SendResult.fromHttpStatus(
+        response.statusCode,
+        serverResponse: _safeResponseBody(response.body),
+      );
+      if (!result.isSuccess) {
         _logManager.log(
             'ServerService: batch failed ${response.statusCode} (${dataList.length} records)');
       }
-      return ok;
+      return result;
+    } on TimeoutException {
+      const result = SendResult.failure(
+        code: 'TIMEOUT',
+        message: 'Сервер не ответил за 20 секунд',
+        owner: 'Сеть/сервер',
+      );
+      _logManager.log('ServerService: batch request timed out');
+      return result;
+    } on SocketException {
+      const result = SendResult.failure(
+        code: 'SERVER_UNREACHABLE',
+        message: 'Сервер недоступен: проверьте интернет или VPN',
+        owner: 'Телефон/сеть',
+      );
+      _logManager.log('ServerService: server unreachable');
+      return result;
     } catch (e) {
       _logManager.log('ServerService: batch request failed: $e');
-      return false;
+      return const SendResult.failure(
+        code: 'UNKNOWN_NETWORK_ERROR',
+        message: 'Неизвестная ошибка соединения',
+        owner: 'Не определено',
+      );
     }
+  }
+
+  String _safeResponseBody(String body) {
+    final normalized = body.trim();
+    if (normalized.isEmpty) return 'Пустой ответ';
+    if (normalized.length <= _maxStoredResponseLength) return normalized;
+    return '${normalized.substring(0, _maxStoredResponseLength)}…';
   }
 
   void init() {
@@ -197,4 +280,92 @@ class ServerService {
   void dispose() {
     _logController.close();
   }
+}
+
+class SendResult {
+  const SendResult._({
+    required this.isSuccess,
+    required this.code,
+    required this.message,
+    required this.owner,
+    required this.httpStatus,
+    required this.serverResponse,
+  });
+
+  factory SendResult.success({
+    int? httpStatus,
+    String? serverResponse,
+  }) =>
+      SendResult._(
+        isSuccess: true,
+        code: 'OK',
+        message: 'Отправлено',
+        owner: '',
+        httpStatus: httpStatus,
+        serverResponse: serverResponse,
+      );
+
+  const SendResult.failure({
+    required String code,
+    required String message,
+    required String owner,
+    int? httpStatus,
+    String? serverResponse,
+  }) : this._(
+          isSuccess: false,
+          code: code,
+          message: message,
+          owner: owner,
+          httpStatus: httpStatus,
+          serverResponse: serverResponse,
+        );
+
+  factory SendResult.fromHttpStatus(
+    int statusCode, {
+    String? serverResponse,
+  }) {
+    if (statusCode >= 500) {
+      return SendResult.failure(
+        code: 'HTTP_$statusCode',
+        message: 'Ошибка сервера HTTP $statusCode',
+        owner: 'Сервер',
+        httpStatus: statusCode,
+        serverResponse: serverResponse,
+      );
+    }
+    if (statusCode == 408 || statusCode == 429) {
+      return SendResult.failure(
+        code: 'HTTP_$statusCode',
+        message: statusCode == 429
+            ? 'Сервер временно ограничил частоту запросов'
+            : 'Сервер не успел обработать запрос',
+        owner: 'Сервер',
+        httpStatus: statusCode,
+        serverResponse: serverResponse,
+      );
+    }
+    if (statusCode == 401 || statusCode == 403) {
+      return SendResult.failure(
+        code: 'HTTP_$statusCode',
+        message: 'Сервер отклонил авторизацию HTTP $statusCode',
+        owner: 'API/сервер',
+        httpStatus: statusCode,
+        serverResponse: serverResponse,
+      );
+    }
+    return SendResult.failure(
+      code: 'HTTP_$statusCode',
+      message: 'API отклонил пакет HTTP $statusCode',
+      owner: 'API/сервер',
+      httpStatus: statusCode,
+      serverResponse: serverResponse,
+    );
+  }
+
+  final bool isSuccess;
+  final String code;
+  final String message;
+  final String owner;
+  final int? httpStatus;
+  final String? serverResponse;
 }

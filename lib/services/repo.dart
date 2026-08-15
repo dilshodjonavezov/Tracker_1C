@@ -42,6 +42,15 @@ class Repo {
       syncable: true,
       rejectionReason: quality.rejectionReason,
     );
+    // A real coordinate confirms that location access has been restored.
+    await LocationDao().closeOpenDeviceIssues(
+      userId: userId,
+      endedAt: now,
+    );
+    await prefs.setInt(
+      'last_location_received_at',
+      now.millisecondsSinceEpoch,
+    );
 
     if (quality.isAccepted) {
       await _gpsQualityFilter.markAccepted(data, capturedAt: now);

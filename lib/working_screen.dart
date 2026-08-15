@@ -1,6 +1,6 @@
 import 'package:background_location_tracker_example/log_manager.dart';
-import 'package:background_location_tracker_example/main.dart';
 import 'package:background_location_tracker_example/managers/log_manager.dart';
+import 'package:background_location_tracker_example/screens/location_report_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -11,7 +11,8 @@ class TrackingScreen extends StatefulWidget {
   _TrackingScreenState createState() => _TrackingScreenState();
 }
 
-class _TrackingScreenState extends State<TrackingScreen> with WidgetsBindingObserver {
+class _TrackingScreenState extends State<TrackingScreen>
+    with WidgetsBindingObserver {
   String? userId;
   bool _isLoading = true;
 
@@ -48,34 +49,37 @@ class _TrackingScreenState extends State<TrackingScreen> with WidgetsBindingObse
     });
   }
 
- Future<void> _loadUserId() async {
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    String? loadedUserId = prefs.getString('user_id');
-    
-    if (loadedUserId == null || loadedUserId.isEmpty) {
-      await LogManager().log('TrackingScreen: WARNING - userId is null or empty!');
-      // Проверяем резервную копию
-      loadedUserId = prefs.getString('user_id_backup');
-      if (loadedUserId != null && loadedUserId.isNotEmpty) {
-        await prefs.setString('user_id', loadedUserId);
-        await LogManager().log('TrackingScreen: Restored userId from backup: $loadedUserId');
-      } else {
-        // Если нет резервной копии, перенаправляем на экран логина
-        await LogManager().log('TrackingScreen: No valid userId, redirecting to login');
-        Navigator.of(context).pushReplacementNamed('/');
-        return;
+  Future<void> _loadUserId() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String? loadedUserId = prefs.getString('user_id');
+
+      if (loadedUserId == null || loadedUserId.isEmpty) {
+        await LogManager()
+            .log('TrackingScreen: WARNING - userId is null or empty!');
+        // Проверяем резервную копию
+        loadedUserId = prefs.getString('user_id_backup');
+        if (loadedUserId != null && loadedUserId.isNotEmpty) {
+          await prefs.setString('user_id', loadedUserId);
+          await LogManager().log(
+              'TrackingScreen: Restored userId from backup: $loadedUserId');
+        } else {
+          // Если нет резервной копии, перенаправляем на экран логина
+          await LogManager()
+              .log('TrackingScreen: No valid userId, redirecting to login');
+          Navigator.of(context).pushReplacementNamed('/');
+          return;
+        }
       }
+
+      setState(() {
+        userId = loadedUserId;
+      });
+      await LogManager().log('TrackingScreen: Loaded userId: $loadedUserId');
+    } catch (e) {
+      await LogManager().log('TrackingScreen: ERROR loading userId: $e');
     }
-    
-    setState(() {
-      userId = loadedUserId;
-    });
-    await LogManager().log('TrackingScreen: Loaded userId: $loadedUserId');
-  } catch (e) {
-    await LogManager().log('TrackingScreen: ERROR loading userId: $e');
   }
-}
 
   Future<void> _ensureDataPersisted() async {
     try {
@@ -83,7 +87,8 @@ class _TrackingScreenState extends State<TrackingScreen> with WidgetsBindingObse
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('user_id', userId!);
         await prefs.setString('user_id_backup', userId!); // Резервная копия
-        await LogManager().log('TrackingScreen: userId persisted before pause: $userId');
+        await LogManager()
+            .log('TrackingScreen: userId persisted before pause: $userId');
       }
     } catch (e) {
       await LogManager().log('TrackingScreen: ERROR persisting userId: $e');
@@ -100,6 +105,18 @@ class _TrackingScreenState extends State<TrackingScreen> with WidgetsBindingObse
         title: const Text('Отслеживание активно'),
         centerTitle: true,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.calendar_month),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const LocationReportScreen(),
+                ),
+              );
+            },
+            tooltip: 'Отчёт GPS',
+          ),
           IconButton(
             icon: const Icon(Icons.list_alt),
             onPressed: () {
